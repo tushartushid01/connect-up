@@ -1,6 +1,10 @@
 package server
 
 import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -213,3 +217,83 @@ func (srv *Server) verifyEmail(resp http.ResponseWriter, req *http.Request) {
 			for user. This method is used by user to completing the self
 			profile.
 */
+
+func (srv *Server) getAllIndustriesForUser(resp http.ResponseWriter, req *http.Request) {
+	startTime := time.Now()
+	category := req.URL.Query().Get("category")
+
+	if category == "" {
+		category = string(models.IndustriesCategoryConnectionsAndGroups)
+	}
+
+	industries, err := srv.DBHelper.GetAllIndustriesForUser(category)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Failed to get user information")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, industries)
+	logrus.Infof("getAllIndustriesForUser: request time for all industries for user successfully: %d", time.Since(startTime).Milliseconds())
+}
+
+func (srv *Server) getAllIndustries(resp http.ResponseWriter, req *http.Request) {
+	startTime := time.Now()
+	filterQueries, err := utils.GetIndustriesFilters(req)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "errors in getting filters")
+		return
+	}
+
+	industries, err := srv.DBHelper.GetAllIndustries(filterQueries)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Failed to get user information")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, industries)
+	logrus.Infof("getAllIndustries: request time for all industries for user successfully: %d", time.Since(startTime).Milliseconds())
+}
+
+/*     	* ping
+* 	@Description This method is used to update the online status of user.
+ */
+func (srv *Server) ping(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	err := srv.DBHelper.Ping(uc)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Failed to ping user")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "pong",
+	})
+}
+
+/*     	* getOnlineStatusOfUsers
+* 	@Description This method is used to get the online status of other user.
+ */
+func (srv *Server) getOnlineStatusOfUsers(resp http.ResponseWriter, req *http.Request) {
+	startTime := time.Now()
+	var users struct {
+		UserIDs []int `json:"userIds"`
+	}
+
+	err := json.NewDecoder(req.Body).Decode(&users)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Failed to get status of users", "unable to parse")
+		return
+	}
+
+	statuses, err := srv.DBHelper.GetOnlineStatusOfUsers(users.UserIDs)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Failed to get user online statuses")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"statuses": statuses,
+	})
+	logrus.Infof("getAllIndustries: request time for all industries for user successfully: %d", time.Since(startTime).Milliseconds())
+}
