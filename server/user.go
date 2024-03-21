@@ -464,20 +464,3 @@ func (srv *Server) createUserSession(resp http.ResponseWriter, req *http.Request
 	utils.EncodeJSON200Body(resp, newSessionToken)
 	logrus.Infof("createUserSession: request time for all industries for user successfully: %d", time.Since(startTime).Milliseconds())
 }
-
-func (srv *Server) validateUserSession(resp http.ResponseWriter, req *http.Request) {
-	uc := srv.getUserContext(req)
-
-	if uc.Session == nil {
-		connectuperror.RespondClientErr(resp, req, errors.New("session not found"), http.StatusBadRequest, "session not found")
-		return
-	}
-
-	newSessionID, err := srv.DBHelper.ValidateSession(uc.Session.Token)
-	if err != nil {
-		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "failed to create new session")
-		return
-	}
-
-	utils.EncodeJSON200Body(resp, newSessionID)
-}
