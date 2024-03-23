@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -463,4 +464,151 @@ func (srv *Server) createUserSession(resp http.ResponseWriter, req *http.Request
 
 	utils.EncodeJSON200Body(resp, newSessionToken)
 	logrus.Infof("createUserSession: request time for all industries for user successfully: %d", time.Since(startTime).Milliseconds())
+}
+
+func (srv *Server) validateUserSession(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	if uc.Session == nil {
+		connectuperror.RespondClientErr(resp, req, errors.New("session not found"), http.StatusBadRequest, "session not found")
+		return
+	}
+
+	newSessionID, err := srv.DBHelper.ValidateSession(uc.Session.Token)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "failed to create new session")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, newSessionID)
+}
+
+func (srv *Server) endUserSession(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+	deviceID := req.Header.Get("deviceID")
+	logrus.Infof("endUserSession: end session for userId: %v and session token is: %v and deviceID is: %v", uc.ID, uc.Session.Token, deviceID)
+
+	logrus.Infof("endUserSession: end session for userId: %v and session token is: %v", uc.ID, uc.Session.Token)
+
+	if uc.Session == nil {
+		connectuperror.RespondClientErr(resp, req, errors.New("not session found"), http.StatusBadRequest, "session not found")
+		return
+	}
+
+	err := srv.DBHelper.EndSession(uc.Session.Token)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "failed to end session")
+		return
+	}
+
+	srv.CacheProvider.ClearCache(srv.CacheProvider.GenerateKey(userContextCacheKey, uc.AuthID, uc.Session.Token))
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+}
+
+/*
+  - deleteUser
+  - @Description This method is used to delete user profile
+    from the server and firebase.
+*/
+func (srv *Server) deleteUser(resp http.ResponseWriter, req *http.Request) {
+	startTime := time.Now()
+	uc := srv.getUserContext(req)
+
+	err := srv.DBHelper.DeleteUser(uc.ID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to delete user")
+		return
+	}
+	logrus.Infof("deleteUser: request time after deleting user from db: %d", time.Since(startTime).Milliseconds())
+
+	// Delete authId from Firebase
+	err = srv.AuthProvider.DeleteAuthUser(req.Context(), uc.AuthID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Error while deleting auth user")
+		return
+	}
+
+	logrus.Infof("deleteUser: request time after deleting user from firbase: %d", time.Since(startTime).Milliseconds())
+
+	go func() {
+		// deleting user from the group
+		err = srv.DBHelper.DeleteGroupsForUser(uc.ID)
+		if err != nil {
+			logrus.Errorf("DeleteUser: unable to delete from user from groups %v", err)
+			connectuperror.RespondGenericServerErr(resp, req, err, "Error while deleting groups of user")
+			return
+		}
+	}()
+
+	go func() {
+		// making new admin for chatGroup
+		err := srv.DBHelper.CreateNewChatGroupAdmin(uc.ID)
+		if err != nil {
+			logrus.Errorf("Error updating new admin: %v", err)
+		}
+	}()
+
+	srv.CacheProvider.ClearCache(srv.CacheProvider.GenerateKey(userContextCacheKey, uc.AuthID, uc.Session.Token))
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+	logrus.Infof("deleteUser: request time after success fully deleting: %d", time.Since(startTime).Milliseconds())
+}
+
+func (srv *Server) deleteUserByAdmin(resp http.ResponseWriter, req *http.Request) {
+	startTime := time.Now()
+	userID, err := strconv.Atoi(chi.URLParam(req, "userID"))
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Error parsing userId")
+		return
+	}
+
+	authID, err := srv.DBHelper.GetAuthTokenByID(userID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to get auth token by id")
+		return
+	}
+
+	err = srv.DBHelper.DeleteUser(userID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to delete user")
+		return
+	}
+
+	logrus.Infof("deleteUserByAdmin: request time after deleting user from db by admin: %d", time.Since(startTime).Milliseconds())
+
+	// Delete authId from Firebase
+	err = srv.AuthProvider.DeleteAuthUser(req.Context(), authID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Error while deleting auth user")
+		return
+	}
+
+	logrus.Infof("deleteUserByAdmin: request time after deleting user from firbase: %d", time.Since(startTime).Milliseconds())
+
+	go func() {
+		// deleting user from the group
+		err = srv.DBHelper.DeleteGroupsForUser(userID)
+		if err != nil {
+			logrus.Errorf("deleteUserByAdmin: unable to delete from user from groups: %v", err)
+			connectuperror.RespondGenericServerErr(resp, req, err, "Error while deleting groups of user")
+			return
+		}
+		err = srv.DBHelper.EndSessionOfUserByAdmin(userID, authID)
+		if err != nil {
+			connectuperror.RespondGenericServerErr(resp, req, err, "Error while deleting session of user")
+			return
+		}
+	}()
+
+	// srv.CacheProvider.ClearCache(srv.CacheProvider.GenerateKey(userContextCacheKey, uc.AuthID, uc.Session.Token))
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+	logrus.Infof("deleteUserByAdmin: request time after success fully deleting user by admin: %d", time.Since(startTime).Milliseconds())
 }
