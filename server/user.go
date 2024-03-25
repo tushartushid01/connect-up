@@ -612,3 +612,57 @@ func (srv *Server) deleteUserByAdmin(resp http.ResponseWriter, req *http.Request
 	})
 	logrus.Infof("deleteUserByAdmin: request time after success fully deleting user by admin: %d", time.Since(startTime).Milliseconds())
 }
+
+func (srv *Server) updateFCMToken(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	var updateFCMTokenRequest struct {
+		FcmToken string `json:"fcmToken"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&updateFCMTokenRequest); err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Failed to update session fcm token")
+		return
+	}
+
+	if updateFCMTokenRequest.FcmToken == "" {
+		connectuperror.RespondClientErr(resp, req, errors.New("empty fcm token"), http.StatusBadRequest, "empty fcm token")
+		return
+	}
+
+	err := srv.DBHelper.UpdateSessionFCMToken(uc.Session.Token, updateFCMTokenRequest.FcmToken)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "failed to update fcm token")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+}
+
+func (srv *Server) updateVoipToken(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	var updateVoipTokenRequest struct {
+		VoipToken string `json:"voipToken"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&updateVoipTokenRequest); err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Failed to update session voip token")
+		return
+	}
+
+	if updateVoipTokenRequest.VoipToken == "" {
+		connectuperror.RespondClientErr(resp, req, errors.New("empty voip token"), http.StatusBadRequest, "empty voip token")
+		return
+	}
+
+	err := srv.DBHelper.UpdateSessionVoipToken(uc.Session.Token, updateVoipTokenRequest.VoipToken)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "failed to update voip token")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+}
