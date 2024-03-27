@@ -666,3 +666,99 @@ func (srv *Server) updateVoipToken(resp http.ResponseWriter, req *http.Request) 
 		"message": "success",
 	})
 }
+
+/*     	* userSettings
+* @Description This method is used to get the app setting for specific user.
+ */
+func (srv *Server) userSettings(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+	var settings models.Settings
+	var TotalConnections []models.ConnectionsIDs
+	var totalBlockedContacts []models.ContactIDs
+	var blockedContacts []models.BlockedContacts
+	egp := new(errgroup.Group)
+	egp.Go(func() error {
+		var err error
+		settings, err = srv.DBHelper.GetUserSettings(uc.ID)
+		if err != nil {
+			connectuperror.RespondGenericServerErr(resp, req, err, "Failed to get user settings")
+			return err
+		}
+		return nil
+	})
+	egp.Go(func() error {
+		var err error
+		TotalConnections, err = srv.DBHelper.GetTotalConnectionsCount(uc.ID)
+		if err != nil {
+			connectuperror.RespondGenericServerErr(resp, req, err, "Failed to get total connection count")
+			return err
+		}
+		return nil
+	})
+	egp.Go(func() error {
+		var err error
+		totalBlockedContacts, err = srv.DBHelper.GetAllBlockedContacts(uc.ID)
+		if err != nil {
+			connectuperror.RespondGenericServerErr(resp, req, err, "failed to get total blocked contacts")
+			return err
+		}
+		return nil
+	})
+	egp.Go(func() error {
+		var err error
+		blockedContacts, err = srv.DBHelper.GetAllUserBlockedContacts(uc.ID)
+		if err != nil {
+			connectuperror.RespondGenericServerErr(resp, req, err, "Failed to get user settings")
+			return err
+		}
+		return nil
+	})
+	err := egp.Wait()
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "error getting user settings")
+		return
+	}
+	settings.TotalBlockedContacts = 0
+	if len(blockedContacts) > 0 {
+		settings.TotalBlockedContacts = len(blockedContacts)
+	}
+
+	settings.BlockedContacts = blockedContacts
+	settings.TotalConnectionsCount = 0
+	if len(TotalConnections) > 0 {
+		settings.TotalConnectionsCount = len(TotalConnections)
+	}
+	for i := 0; i < len(TotalConnections); i++ {
+		for _, BlockedID := range totalBlockedContacts {
+			if TotalConnections[i].UserID == BlockedID.UserID {
+				settings.TotalConnectionsCount--
+			}
+		}
+	}
+	utils.EncodeJSON200Body(resp, settings)
+}
+
+/*
+  - upsertUserSettings
+  - @Description This method is used to edit user setting for
+    user.
+*/
+func (srv *Server) upsertUserSettings(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	var editUserSettings models.EditUserSettingsRequest
+	err := json.NewDecoder(req.Body).Decode(&editUserSettings)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Unable to edit user settings", "error parsing request")
+		return
+	}
+
+	editUserSettings.UserID = uc.ID
+	settings, err := srv.DBHelper.UpsertUserSettings(editUserSettings)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Unable to edit user settings")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, settings)
+}
