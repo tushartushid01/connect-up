@@ -762,3 +762,109 @@ func (srv *Server) upsertUserSettings(resp http.ResponseWriter, req *http.Reques
 
 	utils.EncodeJSON200Body(resp, settings)
 }
+
+/*
+  - toggleBlock
+  - @Description This method is used to block user or unblock
+    user from connection lists.
+*/
+func (srv *Server) toggleBlock(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	var toggleBlock struct {
+		UserID  int  `json:"userId"`
+		IsBlock bool `json:"isBlock"`
+	}
+
+	err := json.NewDecoder(req.Body).Decode(&toggleBlock)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Unable to do this operation right now", "error parsing request")
+		return
+	}
+
+	err = srv.DBHelper.ToggleBlockContact(uc.ID, toggleBlock.UserID, toggleBlock.IsBlock)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Unable to edit user settings")
+		return
+	}
+	_, ConnectionID, err := srv.DBHelper.IsAlreadyConnection(uc.ID, toggleBlock.UserID)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "failed to check connection")
+		return
+	}
+
+	err = srv.DBHelper.RemoveUserConnection(ConnectionID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "failed to get user detail")
+		return
+	}
+	chatGroupID, err := srv.DBHelper.GetChatGroupID(uc.ID, toggleBlock.UserID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Unable to get chat group id")
+		return
+	}
+
+	var outboundMessage map[string]interface{}
+	if toggleBlock.IsBlock {
+		outboundMessage = map[string]interface{}{
+			"messageInfo":   "user have been blocked",
+			"chatGroupId":   chatGroupID,
+			"isBlocked":     true,
+			"blockedUserId": toggleBlock.UserID,
+		}
+	} else {
+		outboundMessage = map[string]interface{}{
+			"messageInfo":   "user have been unblocked",
+			"chatGroupId":   chatGroupID,
+			"isBlocked":     false,
+			"blockedUserId": toggleBlock.UserID,
+		}
+	}
+
+	outboundMessageBytes, err := json.Marshal(&models.PublishMessageData{
+		Message: models.Message{
+			Type: models.WSMessageTypeBlockUser,
+			Data: outboundMessage,
+		},
+		SendToUserIDs: []int{uc.ID, toggleBlock.UserID},
+	})
+
+	if err != nil {
+		logrus.Errorf("toggleBlock: error marshal outbound message data  %v", err)
+		return
+	}
+
+	srv.RealtimeHub.Messengers().Publish(models.TopicRealtimeMessage, outboundMessageBytes, map[models.KafkaHeaders]interface{}{
+		models.KafkaHeadersWSConnectionUnixNano: time.Now().UnixNano(),
+	})
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+}
+
+/*     	* editBlockedContacts
+* @Description This method is used to edit contacts.
+		User can remove or add blocked contacts in his profile.
+*/
+// Deprecated
+func (srv *Server) editBlockedContacts(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	var blockedUserIDs struct {
+		IDs []int `json:"ids"`
+	}
+	err := json.NewDecoder(req.Body).Decode(&blockedUserIDs)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Unable to block users", "error parsing request")
+		return
+	}
+	// todo check length of blockedUserIDs
+	UpdateBlockedContacts, err := srv.DBHelper.EditBlockedContacts(uc.ID, blockedUserIDs.IDs)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "Unable to block users")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, UpdateBlockedContacts)
+}
