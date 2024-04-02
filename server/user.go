@@ -868,3 +868,30 @@ func (srv *Server) editBlockedContacts(resp http.ResponseWriter, req *http.Reque
 
 	utils.EncodeJSON200Body(resp, UpdateBlockedContacts)
 }
+
+func (srv *Server) addUserRating(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	var userRating models.UserRating
+	err := json.NewDecoder(req.Body).Decode(&userRating)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Unable to add rating", "error parsing request")
+		return
+	}
+
+	if userRating.UserRating < 1 || userRating.UserRating > 5 {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "rating not valid")
+		return
+	}
+
+	userRating.UserID = uc.ID
+	ratingErr := srv.DBHelper.AddUserRating(userRating)
+	if ratingErr != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusInternalServerError, "Failed to add rating")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "rating added successfully",
+	})
+}
