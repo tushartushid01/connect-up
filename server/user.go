@@ -895,3 +895,45 @@ func (srv *Server) addUserRating(resp http.ResponseWriter, req *http.Request) {
 		"message": "rating added successfully",
 	})
 }
+
+/*     	* changePassword
+* @Description This method is used to change password for user login.
+ */
+func (srv *Server) changePassword(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	var changePassword models.ChangePassword
+	err := json.NewDecoder(req.Body).Decode(&changePassword)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "Unable to do this operation right now", "error parsing request")
+		return
+	}
+	// todo remove oldPassword check
+	if !crypto.IsGoodPassword(changePassword.OldPassword) {
+		connectuperror.RespondClientErr(resp, req, errors.New("old password must be at least 6 characters long"), http.StatusBadRequest, "old password must be at least 6 characters long")
+		return
+	}
+
+	if !crypto.IsGoodPassword(changePassword.NewPassword) {
+		connectuperror.RespondClientErr(resp, req, errors.New("new password must be at least 6 characters long"), http.StatusBadRequest, "new password must be at least 6 characters long")
+		return
+	}
+
+	isOldPasswordCorrect, err := srv.DBHelper.IsPasswordMatched(uc.ID, changePassword.OldPassword)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, errors.New("old password is wrong"), http.StatusBadRequest, "old password is wrong")
+		return
+	}
+
+	if isOldPasswordCorrect {
+		err = srv.DBHelper.ChangeUserPassword(uc, changePassword)
+		if err != nil {
+			connectuperror.RespondGenericServerErr(resp, req, err, "unable to update password")
+			return
+		}
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+}
