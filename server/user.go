@@ -937,3 +937,57 @@ func (srv *Server) changePassword(resp http.ResponseWriter, req *http.Request) {
 		"message": "success",
 	})
 }
+func (srv *Server) addNewUserLocation(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	var userLocation models.NewUserLocationRequest
+	err := json.NewDecoder(req.Body).Decode(&userLocation)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "error parsing request")
+		return
+	}
+
+	userLocation.Token = uc.Session.Token
+	userLocation.UserID = uc.ID
+	err = srv.DBHelper.AddNewUserLocation(&userLocation)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to add user location")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+}
+
+/*     	* getPng
+* 	@Description This method is used to get the png of images available in db.
+ */
+func (srv *Server) getPng(resp http.ResponseWriter, req *http.Request) {
+	imageID, err := strconv.Atoi(req.URL.Query().Get("imageID"))
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "error converting imageID")
+		return
+	}
+
+	isPngAvailable, err := srv.DBHelper.IsPngAvailable(imageID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "error checking png available")
+		return
+	}
+
+	if !isPngAvailable {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "no such svg is available")
+		return
+	}
+
+	pngInfo, err := srv.DBHelper.GetPngURL(imageID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "error getting png url")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"pngInfo": pngInfo,
+	})
+}
