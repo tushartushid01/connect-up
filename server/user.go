@@ -991,3 +991,50 @@ func (srv *Server) getPng(resp http.ResponseWriter, req *http.Request) {
 		"pngInfo": pngInfo,
 	})
 }
+
+func (srv *Server) getNotifications(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	limit, page, err := utils.GetLimitPageFromRequest(req, 50)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "unable to process request")
+	}
+
+	var notificationCategory models.NotificationCategory
+
+	if req.URL.Query().Get("category") != "" {
+		notificationCategory = models.NotificationCategory(req.URL.Query().Get("category"))
+	} else {
+		notificationCategory = models.NotificationCategoryGroups
+	}
+
+	notificationData, err := srv.DBHelper.GetNotificationData(uc.ID, limit, page, notificationCategory)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "error in getting users notifications")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"notificationDetails": notificationData,
+	})
+}
+
+func (srv *Server) readNotification(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+	var notificationID models.GetNotificationID
+
+	err := json.NewDecoder(req.Body).Decode(&notificationID)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "error parsing request")
+		return
+	}
+	err = srv.DBHelper.ReadNotificationForUser(notificationID.NotificationID, uc.ID)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to add user location")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"message": "success",
+	})
+}
