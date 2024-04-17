@@ -1038,3 +1038,51 @@ func (srv *Server) readNotification(resp http.ResponseWriter, req *http.Request)
 		"message": "success",
 	})
 }
+
+/*
+  - getBlockedContacts
+  - @Description This method is used to get list of blocked contacts
+    which are blocked by user.
+*/
+func (srv *Server) getBlockedContacts(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	filterQueries, err := utils.GetIndustriesFilters(req)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "errors in getting filters")
+		return
+	}
+
+	blockedContactsList, _, err := srv.DBHelper.GetBlockedContacts(uc.ID, filterQueries)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to get blocked contacts")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"blockedContacts": blockedContactsList,
+	})
+}
+
+func (srv *Server) reportType(resp http.ResponseWriter, req *http.Request) {
+	category := req.URL.Query().Get("category")
+
+	startTime := time.Now()
+
+	if category == "" {
+		category = string(models.IndustriesCategoryConnectionsAndGroups)
+	}
+
+	reportType, err := srv.DBHelper.GetReportTypes(category)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusInternalServerError, "error getting recommendation")
+		return
+	}
+
+	logrus.Infof("reportType: time taken for getting report Type from db %d", time.Since(startTime).Milliseconds())
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"reportType": reportType,
+	})
+	logrus.Infof("reportType: time taken for encoding data %d", time.Since(startTime).Milliseconds())
+}
