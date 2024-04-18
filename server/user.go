@@ -1086,3 +1086,86 @@ func (srv *Server) reportType(resp http.ResponseWriter, req *http.Request) {
 	})
 	logrus.Infof("reportType: time taken for encoding data %d", time.Since(startTime).Milliseconds())
 }
+
+// getUnreadNotificationsCount godoc
+// @Summary      Get notifications count
+// @Tags         api/user/notifications
+// @Accept       json
+// @Produce      json
+// @Success      200 {object}   models.UnreadNotificationsCount
+// @Failure      500  {object} connectuperror.clientError
+// @Failure      400  {object} connectuperror.clientError
+// @Router       /api/user/notifications_count [get]
+// @Security     ApiKeyAuth
+func (srv *Server) getUnreadNotificationsCount(resp http.ResponseWriter, req *http.Request) {
+	startTime := time.Now()
+	uc := srv.getUserContext(req)
+	category := fmt.Sprintf("%s,%s,%s,%s,%s", models.NotificationCategoryShowcase, models.NotificationCategoryJobs, models.NotificationCategoryGroups, models.NotificationCategoryDeals, models.NotificationCategoryConnections)
+	categories := strings.Split(category, ",")
+	err := srv.DBHelper.GetTotalNotification(uc.ID, categories)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "error getting unread notifications count")
+		return
+	}
+	logrus.Infof("getUnreadNotificationsCount: GetTotalNotification: time taken for basic query db %d ms", time.Since(startTime).Milliseconds())
+
+	var unreadCount models.UnreadNotificationsCount
+	var totalRequestCount int
+	egp := new(errgroup.Group)
+	egp.Go(func() error {
+		unreadCount, err = srv.DBHelper.GetUnreadNotificationsCount(uc.ID)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	egp.Go(func() error {
+		totalRequestCount, err = srv.DBHelper.GetTotalConnectionNotificationCount(uc.ID)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	err = egp.Wait()
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "error getting notification count")
+		return
+	}
+
+	unreadCount.TotalUnreadCount = unreadCount.ConnectionsUnreadCount + totalRequestCount
+	unreadCount.ConnectionsUnreadCount = totalRequestCount
+
+	logrus.Infof("getUnreadNotificationsCount: time taken for basic query db %d ms", time.Since(startTime).Milliseconds())
+
+	utils.EncodeJSON200Body(resp, unreadCount)
+
+	logrus.Infof("getUnreadNotificationsCount: time taken for basic query db with encoding %d ms", time.Since(startTime).Milliseconds())
+}
+
+/*
+  - getBlockedContactsV2
+  - @Description This method is used to get list of blocked contacts
+    which are blocked by user in paginated form.
+*/
+func (srv *Server) getBlockedContactsV2(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	filterQueries, err := utils.GetIndustriesFilters(req)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "errors in getting filters")
+		return
+	}
+
+	blockedContactsList, totalBlockedContacts, err := srv.DBHelper.GetBlockedContacts(uc.ID, filterQueries)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to get blocked contacts")
+		return
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"blockedContacts":      blockedContactsList,
+		"totalBlockedContacts": totalBlockedContacts,
+	})
+}
