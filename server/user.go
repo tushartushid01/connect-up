@@ -1169,3 +1169,130 @@ func (srv *Server) getBlockedContactsV2(resp http.ResponseWriter, req *http.Requ
 		"totalBlockedContacts": totalBlockedContacts,
 	})
 }
+
+/*     	* uploadV2
+* 	@Description This method is used to upload image in db and cloud storage.
+ */
+func (srv *Server) uploadV2(resp http.ResponseWriter, req *http.Request) {
+	uc := srv.getUserContext(req)
+
+	defer func(req *http.Request) {
+		if req.MultipartForm != nil { // prevent panic from nil pointer
+			if err := req.MultipartForm.RemoveAll(); err != nil {
+				logrus.Errorf("Unable to remove all multipart form. %+v", err)
+			}
+		}
+	}(req)
+
+	req.Body = http.MaxBytesReader(resp, req.Body, 51<<20)
+
+	if err := req.ParseMultipartForm(51 << 20); err != nil {
+		if err == io.EOF || err.Error() == string(models.MultipartUnexpectedEOF) {
+			logrus.Warn("EOF")
+		} else {
+			logrus.Errorf("[ParseMultipartForm] %s", err.Error())
+		}
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "unable to parse file", "error parsing file")
+		return
+	}
+
+	file, header, err := req.FormFile("file")
+
+	defer func() {
+		if err = file.Close(); err != nil {
+			logrus.Errorf("Unable to close file multipart form. %+v", err)
+		}
+	}()
+
+	if err != nil {
+		if err == io.EOF {
+			logrus.Warn("EOF")
+		} else {
+			logrus.Error(err)
+		}
+
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "unable to read file", "unable to read file")
+		return
+	}
+
+	typeOfUploadBinary := models.UploadBinaryType(req.FormValue("upload_binary_type"))
+	typeOfUpload := models.UploadType(req.FormValue("type"))
+
+	filePath := ""
+
+	switch typeOfUploadBinary {
+	case models.UploadBinaryTypeImage:
+		filePath = fmt.Sprintf(`images/%v/%v-%s`, typeOfUpload, time.Now().Unix(), header.Filename)
+	case models.UploadBinaryTypeVideo:
+		filePath = fmt.Sprintf(`videos/%v/%v-%s`, typeOfUpload, time.Now().Unix(), header.Filename)
+	case models.UploadBinaryTypeAudio:
+		filePath = fmt.Sprintf(`audios/%v/%v-%s`, typeOfUpload, time.Now().Unix(), header.Filename)
+	case models.UploadBinaryTypeDocument:
+		filePath = fmt.Sprintf(`documents/%v/%v-%s`, typeOfUpload, time.Now().Unix(), header.Filename)
+	default:
+		connectuperror.RespondGenericServerErr(resp, req, errors.New("file type not valid"), "invalid file type")
+		return
+	}
+
+	err = srv.StorageProvider.Upload(req.Context(), utils.GetUploadsBucketName(), file, filePath, "application/octet-stream", false)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to upload file")
+		return
+	}
+
+	url, err := srv.StorageProvider.GetSharableURL(utils.GetUploadsBucketName(), filePath, time.Hour*24*365)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to get url")
+		return
+	}
+
+	SQL := `INSERT INTO uploads 
+			(name, bucket, path, type, uploaded_by, binary_type, url, url_expiration_time) 
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING id,u_id`
+
+	var files models.Upload
+
+	args := []interface{}{
+		header.Filename,
+		utils.GetUploadsBucketName(),
+		filePath,
+		typeOfUpload,
+		uc.ID,
+		typeOfUploadBinary,
+		url,
+		time.Now().AddDate(1, 0, 0),
+	}
+
+	err = srv.PSQL.DB().Get(&files, SQL, args...)
+	if err != nil {
+		logrus.Errorf("uploadV2: error inserting into upload: %v", err)
+		connectuperror.RespondGenericServerErr(resp, req, err, "Error inserting file")
+		return
+	}
+
+	var thumbURL string
+	if typeOfUploadBinary == models.UploadBinaryTypeVideo {
+		if thumbURL, err = thumbnailUpload(req, srv, url, header, uc, files); err != nil {
+			logrus.Errorf("uploadV2: unable to generate thumbnail %v", err)
+		}
+	}
+
+	if strings.Contains(header.Filename, ".svg") {
+		_, err := srv.ConvertSVGToPNG(resp, req, file, typeOfUpload, uc, files)
+		if err != nil {
+			logrus.Errorf("uploadV2: unable to generate png of svg thumbnail %v", err)
+		}
+	}
+
+	if typeOfUploadBinary != models.UploadBinaryTypeVideo {
+		thumbURL = url
+	}
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"id":           files.FileID,
+		"imageUID":     files.FileUUID,
+		"url":          url,
+		"thumbnailUrl": thumbURL,
+	})
+}
