@@ -1296,3 +1296,70 @@ func (srv *Server) uploadV2(resp http.ResponseWriter, req *http.Request) {
 		"thumbnailUrl": thumbURL,
 	})
 }
+
+func (srv *Server) ConvertSVGToPNG(resp http.ResponseWriter, req *http.Request, file multipart.File, typeOfUpload models.UploadType, uc *models.UserContext, files models.Upload) (bool, error) {
+	_, err := file.Seek(0, 0)
+	if err != nil {
+		logrus.Errorf("unable to seek the file %v", err)
+		return true, err
+	}
+
+	pngFileName, err := utils.ConvertToPNG(file)
+	if err != nil {
+		// connectuperror.RespondGenericServerErr(resp, req, err, "unable to convert to png")
+		return true, err
+	}
+
+	defer func(name string) {
+		err := os.Remove(name)
+		if err != nil {
+			logrus.Errorf("unable to remove file %v", err)
+		}
+	}(pngFileName)
+
+	err = srv.StorageProvider.Upload(req.Context(), utils.GetUploadsBucketName(), file, pngFileName, "application/octet-stream", true)
+	if err != nil {
+		// connectuperror.RespondGenericServerErr(resp, req, err, "unable to upload file")
+		return true, err
+	}
+
+	url, err := srv.StorageProvider.GetSharableURL(utils.GetUploadsBucketName(), pngFileName, time.Hour*24*365)
+	if err != nil {
+		// connectuperror.RespondGenericServerErr(resp, req, err, "unable to get url")
+		return true, err
+	}
+
+	SQL := `INSERT INTO uploads 
+			(name, bucket, path, type, uploaded_by, binary_type, url, url_expiration_time) 
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING id,u_id`
+
+	var pngFiles models.Upload
+
+	args := []interface{}{
+		fmt.Sprintf("%v-%v.png", "industry", time.Now().Unix()),
+		utils.GetUploadsBucketName(),
+		pngFileName,
+		typeOfUpload,
+		uc.ID,
+		models.UploadBinaryTypeImage,
+		url,
+		time.Now().AddDate(1, 0, 0),
+	}
+
+	err = srv.PSQL.DB().Get(&pngFiles, SQL, args...)
+	if err != nil {
+		logrus.Errorf("uploadV2: error inserting into upload: %v", err)
+		// connectuperror.RespondGenericServerErr(resp, req, err, "Error inserting file")
+		return true, err
+	}
+
+	SQL = `insert into svg_to_png (svg_id, png_id) values ($1,$2);`
+
+	_, err = srv.PSQL.DB().Exec(SQL, files.FileID, pngFiles.FileID)
+	if err != nil {
+		logrus.Errorf("uploadV2: error inserting into upload: %v", err)
+		return true, err
+	}
+	return false, nil
+}
