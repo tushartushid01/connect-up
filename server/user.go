@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"strconv"
@@ -1362,4 +1364,120 @@ func (srv *Server) ConvertSVGToPNG(resp http.ResponseWriter, req *http.Request, 
 		return true, err
 	}
 	return false, nil
+}
+
+func thumbnailUpload(req *http.Request, srv *Server, url string, header *multipart.FileHeader, uc *models.UserContext, files models.Upload) (string, error) {
+	var thumbnailURL string
+	if env.InKubeCluster() {
+		thumbnailHost := srv.DynamicConfig.GetString(config.ThumbnailGeneratorHost)
+		thumbnailURL = fmt.Sprintf("http://%s/thumbnail", thumbnailHost)
+	} else {
+		thumbnailURL = "http://127.0.0.1:5000/thumbnail"
+	}
+	logrus.Infof("thumbnailUpload: thumbnailURL is %s", thumbnailURL)
+	type body struct {
+		URL      string `json:"url"`
+		Filename string `json:"filename"`
+	}
+
+	data, err := json.Marshal(body{URL: url, Filename: header.Filename})
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: marshal err %v", err)
+		return "", err
+	}
+	reader := bytes.NewReader(data)
+
+	// nolint:gosec // no problem
+	response, err := http.Post(thumbnailURL, "application/json;content=UTF-8", reader)
+	logrus.Infof("thumbnailUpload: response status is %v and error is %v", response, err)
+	if response == nil {
+		logrus.Infof("thumbnailUpload: response is nil")
+		return "", errors.New("not able to get thumbnail")
+	}
+	if response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusInternalServerError || err != nil {
+		return "", err
+	}
+
+	err = os.MkdirAll("images/thumbnail", models.PermValue)
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: unable to create directory %v", err)
+		return "", err
+	}
+
+	FileName := fmt.Sprintf("%v%v.png", "thumbnail", time.Now().Unix())
+	FilePath := fmt.Sprintf(`images/%v/%v-%s`, models.UploadTypeThumbnail, time.Now().Unix(), FileName)
+
+	file, err := os.Create(FilePath)
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: unable to create file %v", err)
+		return "", err
+	}
+
+	size, err := io.Copy(file, response.Body)
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: unable to copy into file %v", err)
+		return "", err
+	}
+
+	if size/(1024*1024) > 5 {
+		return "", errors.New("file size is more then 5 mb")
+	}
+
+	err = file.Close()
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: unable to close file %v", err)
+	}
+
+	err = srv.StorageProvider.Upload(req.Context(), utils.GetUploadsBucketName(), file, FilePath, "application/octet-stream", true)
+	if err != nil {
+		return "", err
+	}
+
+	thumbURL, err := srv.StorageProvider.GetSharableURL(utils.GetUploadsBucketName(), FilePath, time.Hour*24*365)
+	if err != nil {
+		return "", err
+	}
+
+	err = os.Remove(FilePath)
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: unable to remove file %v", err)
+	}
+
+	err = response.Body.Close()
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: unable to close response %v", err)
+	}
+
+	SQL := `INSERT INTO uploads 
+			(name, bucket, path, type, uploaded_by, binary_type, url, url_expiration_time) 
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8) returning id`
+
+	args := []interface{}{
+		FileName,
+		utils.GetUploadsBucketName(),
+		FilePath,
+		models.UploadTypeThumbnail,
+		uc.ID,
+		models.UploadBinaryTypeImage,
+		thumbURL,
+		time.Now().AddDate(1, 0, 0),
+	}
+
+	var thumbnail models.Upload
+	err = srv.PSQL.DB().Get(&thumbnail, SQL, args...)
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: error inserting into upload: %v", err)
+		return "", err
+	}
+
+	SQL = `INSERT INTO thumbnail (upload_id, thumbnail_id) 
+			VALUES ($1, $2)`
+
+	_, err = srv.PSQL.DB().Exec(SQL, files.FileID, thumbnail.FileID)
+	if err != nil {
+		logrus.Errorf("thumbnailUpload: error inserting into upload: %v", err)
+		return "", err
+	}
+
+	return thumbURL, nil
 }
