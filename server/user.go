@@ -1481,3 +1481,154 @@ func thumbnailUpload(req *http.Request, srv *Server, url string, header *multipa
 
 	return thumbURL, nil
 }
+
+/*     	* uploadImageV3
+* 	@Description This method is used to upload image in db and cloud storage.
+ */
+func (srv *Server) uploadImageV3(resp http.ResponseWriter, req *http.Request) {
+	startTime := time.Now()
+	uc := srv.getUserContext(req)
+	defer func(req *http.Request) {
+		if req.MultipartForm != nil { // prevent panic from nil pointer
+			if err := req.MultipartForm.RemoveAll(); err != nil {
+				logrus.Errorf("Unable to remove all multipart form. %+v", err)
+			}
+		}
+	}(req)
+
+	req.Body = http.MaxBytesReader(resp, req.Body, 51<<20)
+
+	if err := req.ParseMultipartForm(51 << 20); err != nil {
+		if err == io.EOF || err.Error() == string(models.MultipartUnexpectedEOF) {
+			logrus.Warn("EOF")
+		} else {
+			logrus.Errorf("[ParseMultipartForm] %s", err.Error())
+		}
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "unable to parse file", "error parsing file")
+		return
+	}
+
+	file, header, err := req.FormFile("file")
+
+	defer func() {
+		if err = file.Close(); err != nil {
+			logrus.Errorf("Unable to close file multipart form. %+v", err)
+		}
+	}()
+
+	if err != nil {
+		if err == io.EOF {
+			logrus.Warn("EOF")
+		} else {
+			logrus.Error(err)
+		}
+
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "unable to read file", "unable to read file")
+		return
+	}
+
+	imageBytes, err := io.ReadAll(file)
+	if err != nil {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "file is not an image")
+		return
+	}
+
+	mediaType := strings.Split(mimetype.Detect(imageBytes).String(), "/")
+	if mediaType[0] != string(models.MIMEMediaTypeImage) {
+		connectuperror.RespondClientErr(resp, req, err, http.StatusBadRequest, "file is not an image")
+		return
+	}
+
+	filePath := fmt.Sprintf(`images/user_profile/%v-%s`, time.Now().Unix(), header.Filename)
+
+	localFilePath, err := utils.CreateImageFile(file, header.Filename)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to create image file")
+		return
+	}
+	defer func() {
+		err = os.Remove(localFilePath)
+		if err != nil {
+			logrus.Errorf("uploadImageV3: error in removing file: %v", err)
+		}
+	}()
+	annotations, err := utils.DetectFaces(resp, localFilePath)
+
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to detect face")
+		return
+	}
+
+	switch {
+	case len(annotations) == 0:
+		connectuperror.RespondClientErr(resp, req, errors.New("add a image that has your face"), http.StatusBadRequest, "Add a image that has your face")
+		return
+	case len(annotations) > 1:
+		connectuperror.RespondClientErr(resp, req, errors.New("image should contain only 1 face"), http.StatusBadRequest, "Image should contain only 1 face")
+		return
+	case annotations[0].DetectionConfidence <= minDetectionConfidence:
+		connectuperror.RespondClientErr(resp, req, errors.New("detection confidence is lesser or equal to 0.5"), http.StatusBadRequest, "Upload a proper image")
+		return
+	case annotations[0].BlurredLikelihood == vision.Likelihood_VERY_LIKELY:
+		connectuperror.RespondClientErr(resp, req, errors.New("image is too blurry to process"), http.StatusBadRequest, "Add a image that has a clear face")
+		return
+	}
+	_, err = file.Seek(0, 0)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to upload image")
+		return
+	}
+
+	err = srv.StorageProvider.Upload(req.Context(), utils.GetUploadsBucketName(), file, filePath, "application/octet-stream", false)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to upload file")
+		return
+	}
+
+	url, err := srv.StorageProvider.GetSharableURL(utils.GetUploadsBucketName(), filePath, time.Hour*24*365)
+	if err != nil {
+		connectuperror.RespondGenericServerErr(resp, req, err, "unable to get url")
+		return
+	}
+
+	SQL := `INSERT INTO uploads 
+			(name, bucket, path, type, uploaded_by, binary_type, url, url_expiration_time) 
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING id,u_id
+			`
+
+	var files models.Upload
+
+	args := []interface{}{
+		header.Filename,
+		utils.GetUploadsBucketName(),
+		filePath,
+		models.UploadTypeUserProfileImage,
+		uc.ID,
+		models.UploadBinaryTypeImage,
+		url,
+		time.Now().AddDate(1, 0, 0),
+	}
+
+	err = srv.PSQL.DB().Get(&files, SQL, args...)
+	if err != nil {
+		logrus.Errorf("upload: error inserting into upload: %v", err)
+		connectuperror.RespondGenericServerErr(resp, req, err, "Error inserting file")
+		return
+	}
+
+	defer func() {
+		err = os.Remove(localFilePath)
+		if err != nil {
+			logrus.Errorf("uploadImageV3: error in removing file: %v", err)
+		}
+	}()
+
+	utils.EncodeJSON200Body(resp, map[string]interface{}{
+		"id":           files.FileID,
+		"imageUID":     files.FileUUID,
+		"url":          url,
+		"thumbnailUrl": url,
+	})
+	logrus.Infof("upload: request time upload data successfully: %d", time.Since(startTime).Milliseconds())
+}
